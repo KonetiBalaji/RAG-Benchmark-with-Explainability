@@ -24,12 +24,14 @@ from src.evaluation.ragas_metrics import get_ragas_evaluator
 from src.evaluation.llm_judge import get_llm_judge
 from src.utils.cost_tracker import get_cost_tracker
 from src.utils.logger import setup_logger
+from src.middleware.rate_limiter import RateLimitMiddleware
+from src.middleware.auth import get_api_key
 
 
 # Initialize FastAPI app
 app = FastAPI(
     title="RAG Benchmark API",
-    description="Production-ready RAG system with multiple configurations and evaluation",
+    description="Production-ready RAG system with security, rate limiting, and evaluation",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -42,6 +44,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Rate limiting middleware
+app.add_middleware(
+    RateLimitMiddleware,
+    rate_limit=60,  # 60 requests per minute
+    window_seconds=60
 )
 
 
@@ -176,11 +185,15 @@ async def health_check():
 
 
 @app.post("/query", response_model=QueryResponse, tags=["Query"])
-async def query_rag(request: QueryRequest):
-    """Query the RAG system.
+async def query_rag(
+    request: QueryRequest,
+    api_key: str = Depends(get_api_key)
+):
+    """Query the RAG system (requires API key).
     
     Args:
         request: Query request with configuration
+        api_key: API key from X-API-Key header
         
     Returns:
         Query response with answer and metadata
@@ -257,11 +270,15 @@ async def query_rag(request: QueryRequest):
 
 
 @app.post("/evaluate", response_model=EvaluationResponse)
-async def evaluate_response(request: EvaluationRequest):
-    """Evaluate a RAG response.
+async def evaluate_response(
+    request: EvaluationRequest,
+    api_key: str = Depends(get_api_key)
+):
+    """Evaluate a RAG response (requires API key).
     
     Args:
         request: Evaluation request with answer and contexts
+        api_key: API key from X-API-Key header
         
     Returns:
         Evaluation scores from RAGAS and LLM-as-Judge

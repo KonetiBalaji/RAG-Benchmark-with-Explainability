@@ -238,6 +238,6 @@ if __name__ == "__main__":
     # Generate sample data when run directly
     generator = SampleDataGenerator()
     paths = generator.generate()
-    print(f"\n[SUCCESS] Sample data generated:")
+    logger.info("Sample data generated successfully")
     for key, path in paths.items():
-        print(f"  {key}: {path}")
+        logger.info(f"  {key}: {path}")
