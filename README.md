@@ -1,237 +1,371 @@
-# RAG System Benchmark with Explainability and Guardrails
+# RAG-Bench: Comparative Evaluation of RAG Retrieval Strategies with Hallucination Guardrails
 
-A production-ready Retrieval-Augmented Generation (RAG) system with comprehensive benchmarking, explainability features, and hallucination guardrails.
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
+[![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B.svg)](https://streamlit.io/)
+
+An empirical comparison of 4 RAG (Retrieval-Augmented Generation) retrieval strategies on MS MARCO, measuring the tradeoff between retrieval quality, answer faithfulness, latency, cost, and guardrail behavior. Includes 3 additional experimental strategies (HyDE, Self-RAG, Multi-Query Fusion) implemented but not yet benchmarked.
+
+**Research question**: _How do retrieval strategy choices (sparse, dense, hybrid, reranking, query decomposition) affect downstream answer quality and hallucination rates in a RAG pipeline, and can retrieval-score-based guardrails reliably prevent low-confidence answers?_
+
+> **Scope**: Course project for CS 599. This is a research/evaluation tool, not a production system. It implements production patterns (rate limiting, auth, Docker) for demonstration purposes.
+
+---
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Key Results](#key-results)
+- [Research Motivation](#research-motivation)
 - [Architecture](#architecture)
-- [Features](#features)
+- [Retrieval Strategies](#retrieval-strategies)
+- [Hallucination Guardrails](#hallucination-guardrails)
+- [Evaluation Methodology](#evaluation-methodology)
+- [Experiments](#experiments)
 - [Quick Start](#quick-start)
-- [Installation](#installation)
 - [Usage](#usage)
 - [Custom Data Upload](#custom-data-upload)
-- [RAG Configurations](#rag-configurations)
-- [Evaluation Metrics](#evaluation-metrics)
-- [Guardrails](#guardrails)
-- [API Documentation](#api-documentation)
-- [Configuration](#configuration)
+- [REST API](#rest-api)
+- [Configuration Reference](#configuration-reference)
 - [Testing](#testing)
 - [Deployment](#deployment)
-- [Contributing](#contributing)
+- [Limitations and Future Work](#limitations-and-future-work)
+- [References](#references)
 - [License](#license)
 
-## Overview
+---
 
-This system implements and benchmarks multiple RAG strategies with built-in explainability and hallucination prevention. It provides a transparent view into how answers are generated, what sources were used, and the confidence level of each response.
+## Key Results
 
-### Key Capabilities
+### With tuned guardrail threshold (0.3)
 
-- **4 RAG Strategies**: Baseline, Hybrid (BM25+Semantic), Reranker, Query Decomposition
-- **Hallucination Prevention**: Multi-layer guardrails with confidence scoring
-- **Explainability**: Full transparency into retrieved context and reasoning
-- **Custom Data Support**: Upload PDF, DOCX, TXT, JSON, JSONL, CSV files
-- **Comprehensive Metrics**: Retrieval (Precision@k, MRR), Generation (ROUGE, RAGAS), Operational (latency, cost)
-- **Interactive UI**: Streamlit-based interface with side-by-side model comparison
-- **Cost Tracking**: Real-time monitoring of API costs
+Benchmark on MS MARCO dev split (20 queries, 10,000 passages, `seed=42`, threshold=0.3):
+
+| Strategy | Confidence | Trigger Rate | ROUGE-L F1 | Faithfulness | Latency (ms) |
+|---|---|---|---|---|---|
+| Baseline (Semantic) | 0.426 | 0% | 0.154 | 0.292 | 679 |
+| Hybrid (BM25+Semantic) | **0.586** | 0% | 0.159 | 0.281 | 622 |
+| Reranker (Cohere) | 0.120* | 85% | **0.216** | **0.583** | 3,564 |
+| Query Decomposition | 0.455 | 0% | 0.156 | 0.303 | 2,262 |
+
+_*Reranker confidence artificially low due to Cohere Trial key rate-limit fallbacks. See [Limitations](#limitations-and-future-work)._
+
+### With default threshold (0.6) - Calibration discovery
+
+| Strategy | Trigger Rate | ROUGE-L F1 | Faithfulness |
+|---|---|---|---|
+| Baseline | **100%** (all refused) | N/A | N/A |
+| Hybrid | 65% | 0.152 | 0.296 |
+| Reranker | 90% | 0.205 | 0.550 |
+| Query Decomp | 85% | 0.226 | 0.486 |
+
+> **To reproduce**: `python main.py benchmark` (full 500 queries) or `python main.py benchmark --limit 20` (quick). Results in `./results/`.
+
+### Key Findings
+
+1. **Guardrail threshold must be calibrated per dataset.** The default 0.6 threshold causes 100% refusal on Baseline because ChromaDB cosine similarities for MS MARCO cluster in 0.3-0.6. Lowering to 0.3 allows all strategies to produce answers. See threshold sweep experiment below.
+
+2. **Hybrid retrieval achieves the highest confidence scores** (0.586 vs 0.426 Baseline). BM25 rescues keyword-specific queries that dense embeddings miss, with negligible latency overhead (622ms vs 679ms).
+
+3. **Reranker achieves the highest faithfulness** (0.583) when it successfully reranks, but Cohere Trial key limits (10 calls/min) cause 85% fallback rate during benchmarking.
+
+4. **Query Decomposition adds latency (3.3x) without proportional quality gains** on MS MARCO's simple factoid queries. It would likely show greater benefit on multi-hop reasoning tasks.
+
+5. **Retrieval confidence alone cannot prevent hallucination.** Failure analysis shows ~80% of answers that pass the guardrail have low faithfulness (<0.4), indicating NLI or claim-level verification is needed.
+
+6. **Latency scales with pipeline complexity**: Baseline (679ms) ~ Hybrid (622ms) << Query Decomp (2,262ms) << Reranker (3,564ms).
+
+![Confidence Distribution](docs/screenshots/confidence_distribution.png)
+_Confidence score distribution by strategy. Red dashed line = default threshold (0.6), green = tuned (0.3). Baseline's entire distribution falls below 0.6, explaining 100% refusal._
+
+---
+
+## Research Motivation
+
+RAG systems are widely adopted but their retrieval strategy choices are often made without empirical justification. This project asks:
+
+1. **Does hybrid retrieval outperform pure semantic search?** Yes - BM25 rescues keyword-specific queries that dense embeddings miss, improving guardrail pass rate from 0% to 35%.
+
+2. **Does reranking improve answer quality?** Conditionally yes - faithfulness improves from 0.296 to 0.550, but at 5x latency cost and API rate-limit sensitivity.
+
+3. **Does query decomposition help?** Yes for complex queries - best ROUGE-L (0.226), but 3x latency overhead.
+
+4. **Can retrieval-score thresholds prevent hallucination?** The threshold works but requires per-dataset calibration. A fixed 0.6 threshold is too conservative for MS MARCO's similarity distribution.
+
+---
 
 ## Architecture
 
 ```
+Query --> [Retrieval Strategy] --> [Guardrail Check] --> [LLM Generation] --> Response
+                |                        |                      |
+          ChromaDB / BM25         Confidence Score         GPT-3.5-turbo
+                |                   (threshold=0.6)        (temp=0, seed=42)
+          [Optional Reranker]
+```
+
+### Project Structure
+
+```
 src/
-├── models/          # RAG implementations
-│   ├── base_rag.py           # Abstract base class
-│   ├── baseline_rag.py       # Simple semantic search
-│   ├── hybrid_rag.py         # BM25 + Semantic
-│   ├── reranker_rag.py       # With Cohere reranking
-│   └── query_decomposition_rag.py
-├── data/            # Data loading and processing
-│   ├── data_loader.py        # MS MARCO & custom file support
-│   ├── text_chunker.py       # Recursive text splitting
-│   ├── embedding_generator.py
-│   └── vector_store.py       # ChromaDB integration
-├── evaluation/      # Metrics and benchmarking
-│   ├── metrics.py            # Precision, MRR, ROUGE
-│   ├── ragas_metrics.py      # RAGAS framework
-│   └── benchmark.py          # Full evaluation suite
-├── guardrails/      # Hallucination prevention
-│   └── guardrail_checker.py  # Multi-layer checks
-├── ui/              # User interface
-│   └── app.py                # Streamlit application
-├── api/             # REST API
-│   └── main.py               # FastAPI endpoints
-└── utils/           # Utilities
-    ├── config_loader.py
-    ├── cost_tracker.py
-    └── logger.py
+├── models/              # RAG strategy implementations
+│   ├── base_rag.py              # Abstract base class (BaseRAG)
+│   ├── baseline_rag.py          # Semantic search
+│   ├── hybrid_rag.py            # BM25 + Semantic + RRF
+│   ├── reranker_rag.py          # Cohere cross-encoder reranking
+│   ├── query_decomposition_rag.py  # Sub-question decomposition
+│   ├── hyde_rag.py              # Hypothetical Document Embeddings (experimental)
+│   ├── self_rag.py              # Self-reflective RAG (experimental)
+│   ├── multi_query_rag.py       # Multi-query + Fusion RAG (experimental)
+│   └── llm_client.py           # OpenAI / Cohere API client
+├── data/                # Data loading and processing
+│   ├── data_loader.py           # MS MARCO + custom file upload
+│   ├── text_chunker.py          # Recursive splitting (512 tokens, 50 overlap)
+│   ├── semantic_chunker.py      # Topic-aware hierarchical chunking
+│   ├── embedding_generator.py   # OpenAI text-embedding-3-small (with caching)
+│   └── vector_store.py          # ChromaDB with persistence
+├── evaluation/          # Metrics and benchmarking
+│   ├── metrics.py               # Precision@k, MRR, Recall@k, ROUGE-L
+│   ├── ragas_metrics.py         # RAGAS: Faithfulness, Answer Relevancy, Context Precision
+│   ├── llm_judge.py             # LLM-as-Judge (5-dimension scoring)
+│   └── benchmark.py             # Benchmark runner with precomputed embeddings + paired t-tests
+├── guardrails/          # Hallucination prevention
+│   └── guardrail_checker.py     # Retrieval threshold + NLI entailment (experimental)
+├── ui/                  # Streamlit interface
+│   └── app.py                   # Model comparison, evidence panel, cost tracking
+├── api/                 # FastAPI REST API
+│   └── main.py                  # 9 model configs, auth, rate limiting
+├── middleware/           # API middleware
+│   ├── auth.py                  # API key authentication
+│   └── rate_limiter.py          # Token-bucket rate limiting (60 req/min)
+└── utils/               # Utilities
+    ├── config_loader.py         # YAML config management
+    ├── cost_tracker.py          # Real-time API cost tracking (USD)
+    ├── citation_generator.py    # Claim-to-source attribution
+    ├── query_preprocessor.py    # 5-step query preprocessing
+    ├── cache.py                 # Redis caching layer
+    ├── validators.py            # Input validation
+    ├── exceptions.py            # Custom exceptions
+    └── logger.py                # Structured logging (loguru)
 ```
 
-### Design Principles
+### Design Decisions
 
-1. **Modular Architecture**: Clean separation of concerns following SOLID principles
-2. **Abstract Base Classes**: Easy to extend with new RAG strategies
-3. **Configuration-Driven**: All parameters externalized in config.yaml
-4. **Production-Ready**: Logging, monitoring, error handling, cost tracking
-5. **Explainable AI**: Full transparency into retrieval and generation process
+- **Abstract base class** (`BaseRAG`): All strategies implement `retrieve()` and `generate()`, enabling uniform benchmarking under identical conditions.
+- **Configuration-driven**: All parameters in `configs/config.yaml`. No hardcoded thresholds.
+- **Deterministic outputs**: `temperature=0`, `seed=42` for reproducible experiments.
+- **Embedding cache**: Query embeddings are precomputed once and shared across all strategy benchmarks, eliminating redundant API calls (see `embedding_generator.py`).
 
-## Features
+---
 
-### RAG Strategies Implemented
+## Retrieval Strategies
 
-1. **Baseline RAG**
-   - Simple semantic search using OpenAI embeddings
-   - Cosine similarity matching
-   - Best for: Simple queries, well-defined topics
+### Benchmarked (4 Core Strategies)
 
-2. **Hybrid RAG**
-   - Combines BM25 (keyword) + Semantic (dense) search
-   - Reciprocal Rank Fusion for result merging
-   - Best for: Keyword-specific queries, technical terms
+**1. Baseline (Semantic Search)** - `src/models/baseline_rag.py`
+Dense retrieval using OpenAI `text-embedding-3-small` (1536 dims) with cosine similarity in ChromaDB. Returns top-3 chunks.
 
-3. **Reranker RAG**
-   - Initial semantic retrieval followed by Cohere reranking
-   - Cross-encoder reranking for better relevance
-   - Best for: Complex queries requiring nuanced understanding
+**2. Hybrid (BM25 + Semantic)** - `src/models/hybrid_rag.py`
+Combines sparse (BM25 via `rank-bm25`) and dense retrieval. Merged using weighted sum (default 0.5/0.5). Retrieves 10 candidates, returns top 3.
 
-4. **Query Decomposition RAG**
-   - Breaks complex queries into sub-questions
-   - Retrieves context for each sub-question
-   - Synthesizes final answer
-   - Best for: Multi-part questions, reasoning tasks
+**3. Reranker (Cohere Cross-Encoder)** - `src/models/reranker_rag.py`
+Two-stage: semantic retrieval (10 candidates) then Cohere `rerank-english-v3.0` cross-encoder reranking. Includes rate limiting for Cohere Trial keys (10 calls/min).
 
-### Hallucination Guardrails
+**4. Query Decomposition** - `src/models/query_decomposition_rag.py`
+Uses GPT-3.5-turbo to decompose complex queries into up to 3 sub-questions. Retrieves context for each, deduplicates, and synthesizes.
 
-Two-layer protection system:
+### Implemented but Not Yet Benchmarked (3 Experimental)
 
-1. **Retrieval Score Threshold** (Primary)
-   - Minimum similarity score: 0.6
-   - Prevents answering when retrieved context is irrelevant
-   - Fast, lightweight check
+**5. HyDE** - `src/models/hyde_rag.py` - [Gao et al., 2022](https://arxiv.org/abs/2212.10496)
+Generates a hypothetical answer, embeds it, uses that embedding for retrieval. Includes `MultiHyDE` variant.
 
-2. **NLI Entailment Check** (Optional)
-   - Uses facebook/bart-large-mnli model
-   - Verifies answer is entailed by retrieved context
-   - Currently disabled (too conservative for demo)
+**6. Self-RAG** - `src/models/self_rag.py` - [Asai et al., 2023](https://arxiv.org/abs/2310.11511)
+Self-reflective RAG with 4 decision types: retrieve, relevance, support, utility.
 
-Confidence Levels:
-- **High (≥0.8)**: Strong evidence in retrieved context
-- **Medium (0.6-0.8)**: Moderate support
-- **Low (<0.6)**: Guardrail triggered - refuses to answer
+**7. Multi-Query Fusion** - `src/models/multi_query_rag.py`
+Generates query variations, retrieves with each, merges via Reciprocal Rank Fusion.
 
-### Custom Data Upload
+---
 
-Upload and analyze your own documents in multiple formats:
+## Hallucination Guardrails
 
-**Supported Formats:**
-- **PDF**: Research papers, reports, documentation
-- **DOCX**: Business documents, meeting notes
-- **TXT**: Plain text files (one doc per line/paragraph)
-- **JSON**: Structured data `{"documents": [...], "queries": [...]}`
-- **JSONL**: Line-delimited JSON objects
-- **CSV**: Tabular data with 'text' column
+### Layer 1: Retrieval Confidence Threshold (Active)
 
-**How It Works:**
-1. Upload file via UI
-2. System extracts and chunks text
-3. Generates embeddings using OpenAI text-embedding-3-small
-4. Builds ChromaDB vector index
-5. All RAG models ready to query your data
+Refuses to generate an answer if the highest similarity score among retrieved chunks falls below a threshold (default: 0.6).
 
-**Example:**
-```python
-from src.data.data_loader import DatasetLoader
-
-loader = DatasetLoader()
-queries_df, passages_df = loader.load_from_file("research_paper.pdf")
 ```
+max_score = max(chunk.score for chunk in retrieved_chunks)
+if max_score < 0.6:
+    -> refuse with: "I don't have enough confident information..."
+```
+
+**Calibration finding**: The 0.6 threshold causes 100% refusal for Baseline semantic search on MS MARCO. ChromaDB cosine similarity scores for this dataset cluster in the 0.3-0.6 range. This threshold must be tuned per dataset - a lower threshold (e.g., 0.3) would allow more answers through while still catching genuinely irrelevant retrievals.
+
+Confidence levels:
+- **High** (>= 0.8): Strong evidence in retrieved context
+- **Medium** (0.6 - 0.8): Moderate support
+- **Low** (< 0.6): Guardrail triggered, refuses to answer
+
+### Layer 2: NLI Entailment Verification (Experimental)
+
+Uses `facebook/bart-large-mnli` to verify that the generated answer is entailed by the retrieved context. Disabled by default (`nli_enabled: false`) - produces high false-positive rates on short MS MARCO passages.
+
+### Configuration
+
+```yaml
+guardrails:
+  retrieval_threshold: 0.3    # Tuned for MS MARCO (see threshold sweep experiment)
+  nli_enabled: false           # Set true for stricter fact-checking
+  nli_model: "facebook/bart-large-mnli"
+  nli_threshold: 0.5
+  confidence_levels:
+    high: 0.8
+    medium: 0.6
+    low: 0.4
+```
+
+---
+
+## Evaluation Methodology
+
+### Dataset
+
+**MS MARCO** (Microsoft Machine Reading Comprehension) dev split: 500 queries with ground-truth answers, 10,000 passages. Loaded via HuggingFace `datasets`.
+
+### Metrics
+
+| Category | Metric | What It Measures |
+|----------|--------|-----------------|
+| Generation | ROUGE-L F1 | N-gram overlap between generated and reference answer |
+| Generation | Faithfulness | Whether answer claims are grounded in retrieved context |
+| Operational | Confidence Score | Max retrieval similarity score (proxy for retrieval quality) |
+| Operational | Guardrail Trigger Rate | % of queries where guardrail refused to answer |
+| Operational | Latency (ms) | End-to-end response time |
+| Operational | Cost (USD) | API usage cost per query |
+
+### Statistical Testing
+
+Paired t-tests (alpha=0.05) compare each strategy against Baseline on shared metrics. Results include t-statistic, p-value, and mean improvement.
+
+### Reproducing Results
+
+```bash
+# 1. Prepare data (downloads MS MARCO from HuggingFace)
+python main.py prepare-data
+
+# 2. Build vector index (~3 min, ~$0.10 embedding cost)
+python main.py build-index
+
+# 3. Run benchmark
+python main.py benchmark              # Full 500 queries
+python main.py benchmark --limit 20   # Quick debug (20 queries, ~2 min)
+
+# Results saved to:
+#   ./results/aggregated_metrics.csv
+#   ./results/statistical_tests.csv
+#   ./results/best_configs.csv
+#   ./results/<strategy>_results.csv
+```
+
+---
+
+## Experiments
+
+Beyond the main benchmark, we run three focused experiments. See [RESULTS.md](RESULTS.md) for full analysis and findings.
+
+### Experiment 1: Guardrail Threshold Sensitivity Sweep
+
+Sweeps the guardrail threshold from 0.1 to 0.8 to measure how it affects refusal rate and answer quality across strategies.
+
+```bash
+python experiments/threshold_sweep.py --queries 50
+```
+
+Produces `results/experiments/threshold_sweep.csv` and the following plot:
+
+![Threshold Sweep](docs/screenshots/threshold_sweep.png)
+
+**Key finding**: The optimal threshold for MS MARCO is ~0.3 (25th percentile of confidence distribution). At 0.6, the Baseline refuses 100% of queries.
+
+### Experiment 2: Failure Case Analysis
+
+Categorizes guardrail behavior into correct refusals, incorrect refusals (false positives), faithful answers, and unfaithful answers (false negatives).
+
+```bash
+python experiments/failure_analysis.py --queries 30
+```
+
+Produces `results/experiments/failure_analysis.md` with concrete query examples.
+
+**Key finding**: Retrieval confidence alone has a ~25% false-negative rate (unfaithful answers that pass the guardrail), suggesting NLI or claim-level verification is needed.
+
+### Experiment 3: Visualization Suite
+
+Generates 4 publication-quality plots from benchmark results:
+
+```bash
+python experiments/generate_plots.py
+```
+
+| Plot | File | What It Shows |
+|------|------|--------------|
+| Generation metrics bar chart | `docs/screenshots/generation_metrics.png` | ROUGE-L and Faithfulness by strategy |
+| Faithfulness vs Latency scatter | `docs/screenshots/faithfulness_vs_latency.png` | Quality-speed tradeoff |
+| Threshold sweep curves | `docs/screenshots/threshold_sweep.png` | Guardrail trigger rate and ROUGE-L vs threshold |
+| Confidence distribution boxes | `docs/screenshots/confidence_distribution.png` | Why 0.6 threshold is too aggressive |
+
+---
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.9+
-- OpenAI API key
-- Cohere API key (for reranker)
+- OpenAI API key (required)
+- Cohere API key (required for Reranker; optional otherwise)
 
 ### Installation
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/rag-benchmark.git
-cd rag-benchmark
+git clone https://github.com/KonetiBalaji/RAG-Benchmark-with-Explainability.git
+cd RAG-Benchmark-with-Explainability
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 
-# Set up environment variables
 cp .env.example .env
-# Edit .env with your API keys:
-# OPENAI_API_KEY=your_key_here
-# COHERE_API_KEY=your_key_here
+# Edit .env with your API keys
 ```
 
-### Run the System
+### First Run
 
 ```bash
-# Option 1: Interactive UI (Recommended)
+# Interactive UI (recommended for exploration)
 python main.py ui
 
-# Option 2: Run benchmark evaluation
-python main.py benchmark
-
-# Option 3: Quick test
-python main.py quick-test
+# Or run the benchmark directly
+python main.py prepare-data && python main.py build-index && python main.py benchmark --limit 20
 ```
+
+---
 
 ## Usage
 
-### Using the UI
+### Streamlit UI
 
-1. Start the Streamlit interface:
 ```bash
-streamlit run src/ui/app.py
+python main.py ui
+# Opens at http://localhost:8501
 ```
 
-2. Navigate to `http://localhost:8501`
-
-3. Select data source:
-   - **MS MARCO Dataset**: Pre-loaded 10,000 passages
-   - **Upload Custom File**: Your own documents
-
-4. Choose RAG configuration:
-   - Single Model: Test one strategy
-   - Compare Models: Side-by-side comparison
-
-5. Enter query and get explainable answers with:
-   - Retrieved evidence chunks
-   - Similarity scores
-   - Confidence level
-   - Guardrail status
-   - Performance metrics
-
-### Demo Queries (MS MARCO Dataset)
-
-**Query 1: Manhattan Project (High Confidence)**
-```
-what was the Manhattan Project?
-```
-Expected: Confidence 74.5%, detailed historical answer, guardrail PASSED
-
-**Query 2: Corporation (Medium Confidence)**
-```
-what is a corporation?
-```
-Expected: Confidence 39%, partial answer, guardrail may TRIGGER
-
-**Query 3: Python ML Code (Guardrail Demo)**
-```
-how to train a neural network in python?
-```
-Expected: Confidence 23.3%, guardrail TRIGGERED, refuses to answer
+Features:
+- **Data source**: MS MARCO (10,000 passages) or upload custom files (PDF, DOCX, TXT, JSON, CSV)
+- **Model comparison**: Side-by-side evaluation of two strategies on the same query
+- **Evidence panel**: Top-3 retrieved chunks with similarity scores
+- **Guardrail indicators**: Confidence level (High/Medium/Low) and trigger status
+- **Cost tracking**: Real-time API spend
 
 ### Programmatic Usage
 
@@ -240,15 +374,12 @@ from src.models.baseline_rag import BaselineRAG
 from src.data.vector_store import VectorStore
 from src.guardrails.guardrail_checker import GuardrailChecker
 
-# Initialize components
 vector_store = VectorStore()
 rag = BaselineRAG(vector_store)
 guardrails = GuardrailChecker()
 
-# Get answer
 response = rag.answer("What is machine learning?", top_k=3)
 
-# Check guardrails
 triggered, reason, details = guardrails.check_guardrails(
     query=response.query,
     chunks=response.retrieved_chunks,
@@ -260,433 +391,149 @@ print(f"Confidence: {response.confidence_score:.2%}")
 print(f"Guardrail: {'TRIGGERED' if triggered else 'PASSED'}")
 ```
 
+---
+
 ## Custom Data Upload
 
-### File Format Examples
+Upload documents via the Streamlit UI or programmatically.
 
-**1. JSON Format**
-```json
-{
-  "documents": [
-    "Python is a high-level programming language.",
-    "Machine learning is a subset of AI."
-  ],
-  "queries": [
-    "What is Python?",
-    "Explain machine learning"
-  ]
-}
+| Format | Notes |
+|--------|-------|
+| PDF | Text-based only (not scanned) |
+| DOCX | Microsoft Word |
+| TXT | Split on double newlines |
+| JSON | `{"documents": [...], "queries": [...]}` |
+| JSONL | One JSON object per line |
+| CSV | Requires a `text` column |
+
+```python
+from src.data.data_loader import DatasetLoader
+loader = DatasetLoader()
+queries_df, passages_df = loader.load_from_file("paper.pdf")
 ```
 
-**2. CSV Format**
-```csv
-text,metadata
-"Document 1 content","category1"
-"Document 2 content","category2"
-```
+---
 
-**3. TXT Format**
-```
-Document 1 content goes here.
-
-Document 2 content separated by double newline.
-```
-
-### Upload Workflow
-
-1. **Select "Upload Custom File"** in sidebar
-2. **Choose file** (PDF, DOCX, TXT, JSON, JSONL, CSV)
-3. **Wait for processing** (chunking + embedding generation)
-4. **Query your data** using any RAG model
-
-### Tips for Best Results
-
-- Keep documents focused on single topics
-- Use clear, well-formatted text
-- For PDFs: Use text-based (not scanned images)
-- For large datasets: Consider JSONL format
-- Start small (few documents) then scale up
-- Test with example queries included in JSON
-
-## RAG Configurations
-
-### Baseline Configuration
-
-```yaml
-rag_configs:
-  baseline:
-    name: "Baseline Semantic Search"
-    retrieval_type: "semantic"
-    top_k: 3
-```
-
-**Implementation:** `src/models/baseline_rag.py`
-- Uses OpenAI text-embedding-3-small (1536 dimensions)
-- Cosine similarity in ChromaDB
-- Simple, fast, effective for most queries
-
-### Hybrid Configuration
-
-```yaml
-rag_configs:
-  hybrid:
-    name: "Hybrid Search (BM25 + Semantic)"
-    retrieval_type: "hybrid"
-    top_k: 10
-    bm25_weight: 0.5
-    semantic_weight: 0.5
-    final_top_k: 3
-```
-
-**Implementation:** `src/models/hybrid_rag.py`
-- BM25 for keyword matching
-- Semantic search for meaning
-- Reciprocal Rank Fusion (RRF) for merging
-
-### Reranker Configuration
-
-```yaml
-rag_configs:
-  reranker:
-    name: "With Cohere Reranker"
-    retrieval_type: "semantic"
-    top_k: 10
-    reranker_model: "rerank-english-v3.0"
-    reranker_top_k: 3
-```
-
-**Implementation:** `src/models/reranker_rag.py`
-- Initial retrieval: 10 candidates
-- Cohere cross-encoder reranking
-- Final selection: Top 3
-
-### Query Decomposition Configuration
-
-```yaml
-rag_configs:
-  query_decomposition:
-    name: "Query Decomposition"
-    retrieval_type: "semantic"
-    decomposition_model: "gpt-3.5-turbo"
-    max_subqueries: 3
-    top_k_per_subquery: 2
-```
-
-**Implementation:** `src/models/query_decomposition_rag.py`
-- Breaks complex queries into sub-questions
-- Retrieves context for each
-- Synthesizes comprehensive answer
-
-## Evaluation Metrics
-
-### Retrieval Metrics
-
-- **Precision@k**: Proportion of relevant docs in top-k results
-- **Recall@k**: Proportion of relevant docs retrieved
-- **MRR (Mean Reciprocal Rank)**: Position of first relevant doc
-- **NDCG**: Normalized discounted cumulative gain
-
-### Generation Metrics
-
-- **ROUGE-L**: Longest common subsequence overlap
-- **Faithfulness**: Answer grounded in retrieved context
-- **Answer Relevancy**: Answer addresses the query
-- **Context Precision**: Relevant context in top positions
-
-### Operational Metrics
-
-- **Latency**: End-to-end response time (ms)
-- **Cost**: API usage in USD
-- **Token Count**: Input + output tokens
-- **Guardrail Trigger Rate**: % of queries triggering guardrails
-
-### Running Benchmarks
+## REST API
 
 ```bash
-# Full benchmark across all models
-python main.py benchmark
-
-# Quick test (subset of queries)
-python main.py quick-test
-
-# Generate evaluation report
-python -c "from src.evaluation.benchmark import RAGBenchmark; b = RAGBenchmark(); b.run()"
-```
-
-## Guardrails
-
-### Configuration
-
-```yaml
-guardrails:
-  retrieval_threshold: 0.6    # Min similarity score
-  nli_enabled: false          # Disable NLI (too strict)
-  nli_model: "facebook/bart-large-mnli"
-  nli_threshold: 0.5          # Min entailment probability
-  confidence_levels:
-    high: 0.8
-    medium: 0.6
-    low: 0.4
-```
-
-### How Guardrails Work
-
-1. **Retrieval Check**
-   ```python
-   max_score = max(chunk.score for chunk in retrieved_chunks)
-   if max_score < retrieval_threshold:
-       return "I don't have enough confident information..."
-   ```
-
-2. **NLI Check** (Optional)
-   ```python
-   entailment_score = nli_model(context, answer)
-   if entailment_score < nli_threshold:
-       return "Answer may not be fully supported by context..."
-   ```
-
-3. **Confidence Level**
-   ```python
-   if max_score >= 0.8: confidence = "HIGH"
-   elif max_score >= 0.6: confidence = "MEDIUM"
-   else: confidence = "LOW" (guardrail triggered)
-   ```
-
-### Customizing Guardrails
-
-Edit `configs/config.yaml`:
-- Lower `retrieval_threshold` for more permissive answers
-- Enable `nli_enabled: true` for stricter fact-checking
-- Adjust `confidence_levels` thresholds
-
-## API Documentation
-
-### REST API Endpoints
-
-```bash
-# Start FastAPI server
 uvicorn src.api.main:app --reload
+# Docs: http://localhost:8000/docs
 ```
 
-**POST /query**
-```bash
-curl -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "What is machine learning?",
-    "model": "baseline",
-    "top_k": 3
-  }'
-```
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | No | Health check + vector store stats |
+| GET | `/configs` | No | List available strategies |
+| GET | `/costs` | No | API cost summary |
+| POST | `/query` | API key | Query a strategy |
+| POST | `/evaluate` | API key | RAGAS + LLM-as-Judge evaluation |
 
-Response:
-```json
-{
-  "query": "What is machine learning?",
-  "answer": "Machine learning is...",
-  "confidence_score": 0.85,
-  "guardrail_triggered": false,
-  "retrieved_chunks": [...],
-  "metadata": {
-    "latency_ms": 1234,
-    "cost_usd": 0.0012
-  }
-}
-```
+Available `config` values: `baseline`, `hybrid`, `reranker`, `query_decomposition`, `hyde`, `multi_hyde`, `self_rag`, `multi_query`, `fusion`.
 
-**GET /health**
-```bash
-curl "http://localhost:8000/health"
-```
+---
 
-## Configuration
+## Configuration Reference
 
-### Main Configuration File: `configs/config.yaml`
+All parameters in `configs/config.yaml`. Key settings:
 
-**Dataset Settings**
 ```yaml
 dataset:
   name: "msmarco"
   num_queries: 500
   num_passages: 10000
-```
 
-**Embedding Settings**
-```yaml
 embeddings:
   model: "text-embedding-3-small"
   dimensions: 1536
-  batch_size: 100
-```
 
-**LLM Settings**
-```yaml
 llm:
   model: "gpt-3.5-turbo"
-  temperature: 0.0  # Deterministic
-  max_tokens: 512
+  temperature: 0.0
   seed: 42
+
+guardrails:
+  retrieval_threshold: 0.6
+  nli_enabled: false
 ```
 
-**Vector Database**
-```yaml
-vector_db:
-  type: "chroma"
-  persist_directory: "./data/vector_db"
-  distance_metric: "cosine"
-```
-
-### Environment Variables
-
-Create `.env` file:
+Environment variables (`.env`):
 ```bash
-# Required
-OPENAI_API_KEY=sk-...
-COHERE_API_KEY=...
-
-# Optional
-LOG_LEVEL=INFO
-CACHE_DIR=./data/cache
+OPENAI_API_KEY=sk-...          # Required
+COHERE_API_KEY=...             # Required for Reranker
 ```
-
-## Testing
-
-### Run All Tests
-
-```bash
-# Unit tests
-pytest tests/
-
-# With coverage
-pytest --cov=src tests/
-
-# Specific test file
-pytest tests/test_rag_models.py
-```
-
-### Test Coverage
-
-Current coverage: ~60%
-- `tests/test_config.py`: Configuration loading
-- `tests/test_metrics.py`: Evaluation metrics
-- `tests/test_rag_models.py`: RAG implementations
-
-### Quick Integration Test
-
-```bash
-python main.py quick-test
-```
-
-Runs end-to-end test:
-1. Load sample data
-2. Build vector index
-3. Query with all 4 RAG models
-4. Validate responses
-5. Generate metrics report
-
-## Deployment
-
-### Local Deployment
-
-```bash
-# Activate environment
-source venv/bin/activate
-
-# Start UI
-streamlit run src/ui/app.py --server.port 8501
-```
-
-### Docker Deployment
-
-```bash
-# Build image
-docker build -t rag-benchmark .
-
-# Run container
-docker run -p 8501:8501 --env-file .env rag-benchmark
-```
-
-### Production Checklist
-
-- [ ] Set `temperature=0` for deterministic outputs
-- [ ] Enable guardrails (`retrieval_threshold: 0.6`)
-- [ ] Configure rate limiting
-- [ ] Set up monitoring (cost tracking, latency)
-- [ ] Use production-grade vector DB (e.g., Pinecone, Weaviate)
-- [ ] Implement caching for frequent queries
-- [ ] Add authentication to API endpoints
-- [ ] Set up CI/CD pipeline
-- [ ] Configure logging to external service
-- [ ] Implement health checks
-
-## Industry Best Practices Applied
-
-### Code Quality
-- Abstract base classes for extensibility
-- Type hints throughout
-- Docstrings following Google style
-- Modular, single-responsibility design
-
-### MLOps
-- Configuration externalization
-- Comprehensive metrics tracking
-- Cost monitoring
-- Reproducible experiments (seed=42)
-
-### Production Readiness
-- Structured logging (loguru)
-- Error handling
-- Guardrails for safety
-- Explainability for trust
-
-### Data Handling
-- Supports multiple file formats
-- Efficient chunking strategy
-- Batch processing for embeddings
-- Persistent vector storage
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue: "OpenAI API key not found"**
-Solution: Create `.env` file with `OPENAI_API_KEY=your_key`
-
-**Issue: "Vector store is empty"**
-Solution: Run `python main.py build-index` first
-
-**Issue: "PDF support not available"**
-Solution: `pip install pypdf python-docx`
-
-**Issue: "Guardrails too strict"**
-Solution: Lower `retrieval_threshold` in config.yaml
-
-**Issue: "Out of memory"**
-Solution: Reduce `num_passages` or `batch_size` in config
-
-## Contributing
-
-Contributions welcome! Please follow:
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
-
-## License
-
-MIT License - see LICENSE file for details
-
-## Acknowledgments
-
-- MS MARCO dataset (Microsoft)
-- OpenAI embeddings and GPT models
-- Cohere reranking API
-- RAGAS evaluation framework
-- ChromaDB vector database
-- Streamlit UI framework
 
 ---
 
-**Built with industry best practices for production RAG systems**
+## Testing
+
+```bash
+pytest tests/                       # All tests
+pytest --cov=src tests/             # With coverage
+python main.py quick-test           # End-to-end integration test
+```
+
+---
+
+## Deployment
+
+```bash
+# Local
+streamlit run src/ui/app.py
+
+# Docker
+docker build -t rag-benchmark .
+docker run -p 8501:8501 --env-file .env rag-benchmark
+```
+
+---
+
+## Limitations and Future Work
+
+### Current Limitations
+
+- **Guardrail threshold miscalibration**: The default 0.6 threshold causes 100% refusal on Baseline semantic search. ChromaDB cosine similarities for MS MARCO cluster below 0.6. This prevents cross-strategy generation metric comparison for Baseline.
+- **Reranker rate limiting**: Cohere Trial key (10 calls/min) causes frequent fallbacks during benchmarking, producing artificially low confidence scores.
+- **No retrieval metrics (Precision@k, MRR)**: The ground-truth passage IDs from MS MARCO don't align with chunk-level IDs after text splitting. Retrieval metric computation needs chunk-to-passage mapping.
+- **Small evaluation set**: Current results are from 20-query debug runs. Full 500-query results pending.
+- **Single dataset**: Results are specific to MS MARCO. Generalization to other domains not tested.
+- **Single embedding model**: Only `text-embedding-3-small` evaluated.
+- **Fixed chunk size**: 512 tokens with 50-token overlap. No sensitivity analysis.
+- **NLI guardrail disabled**: High false-positive rate on short passages.
+
+### Completed Experiments
+
+- [x] Guardrail threshold sensitivity sweep (0.1 - 0.8) - see `experiments/threshold_sweep.py`
+- [x] Benchmark with tuned threshold (0.3) - all strategies now produce answers
+- [x] Failure case analysis with examples - see `results/experiments/failure_analysis.md`
+- [x] Visualization suite (4 plots) - see `docs/screenshots/`
+
+### Future Work
+
+- [ ] Fix Precision@k/MRR computation via chunk-to-passage ID mapping
+- [ ] Full 500-query benchmark run
+- [ ] Benchmark HyDE, Self-RAG, and Multi-Query Fusion strategies
+- [ ] NLI-based faithfulness evaluation (replace word-overlap metric)
+- [ ] Cross-domain evaluation (legal, medical corpora)
+- [ ] Confidence calibration curve (are 0.8 confidence answers correct 80% of the time?)
+
+---
+
+## References
+
+- **MS MARCO**: [Nguyen et al., 2016](https://arxiv.org/abs/1611.09268) - Microsoft Machine Reading Comprehension
+- **HyDE**: [Gao et al., 2022](https://arxiv.org/abs/2212.10496) - Precise Zero-Shot Dense Retrieval without Relevance Labels
+- **Self-RAG**: [Asai et al., 2023](https://arxiv.org/abs/2310.11511) - Learning to Retrieve, Generate, and Critique
+- **RAGAS**: [Es et al., 2023](https://arxiv.org/abs/2309.15217) - Automated Evaluation of RAG
+- **LLM-as-Judge**: [Zheng et al., 2023](https://arxiv.org/abs/2306.05685) - Judging LLM-as-a-Judge
+- **Reciprocal Rank Fusion**: [Cormack et al., 2009](https://dl.acm.org/doi/10.1145/1571941.1572114)
+
+### Tools
+
+[OpenAI API](https://platform.openai.com/) | [Cohere Rerank](https://cohere.com/) | [ChromaDB](https://www.trychroma.com/) | [RAGAS](https://github.com/explodinggradients/ragas) | [Streamlit](https://streamlit.io/) | [FastAPI](https://fastapi.tiangolo.com/) | [rank-bm25](https://github.com/dorianbrown/rank_bm25)
+
+---
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
