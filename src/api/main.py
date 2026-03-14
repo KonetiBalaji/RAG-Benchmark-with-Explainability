@@ -127,18 +127,37 @@ llm_judge = None
 async def startup_event():
     """Initialize resources on startup."""
     global vector_store, rag_models, guardrail_checker, ragas_evaluator, llm_judge
-    
+
     setup_logger()
     logger.info("Starting RAG Benchmark API...")
-    
+
     # Initialize vector store
     vector_store = VectorStore()
-    logger.info(f"Vector store loaded: {vector_store.get_count()} documents")
-    
+    doc_count = vector_store.get_count()
+    logger.info(f"Vector store loaded: {doc_count} documents")
+
+    # Load corpus texts for BM25 (needed by HybridRAG)
+    corpus_texts = []
+    corpus_ids = []
+    if doc_count > 0:
+        try:
+            from pathlib import Path
+            import pandas as pd
+            from src.data.text_chunker import TextChunker
+            processed_dir = Path("./data/processed")
+            if (processed_dir / "passages.parquet").exists():
+                passages_df = pd.read_parquet(processed_dir / "passages.parquet")
+                chunker = TextChunker()
+                chunks = chunker.chunk_documents(passages_df["text"].tolist())
+                corpus_texts = [c["text"] for c in chunks]
+                corpus_ids = [c["chunk_id"] for c in chunks]
+                logger.info(f"Loaded {len(corpus_texts)} chunks for BM25")
+        except Exception as e:
+            logger.warning(f"Could not load corpus for BM25: {e}. Hybrid model will be unavailable.")
+
     # Initialize RAG models
     rag_models = {
         "baseline": BaselineRAG(vector_store),
-        "hybrid": HybridRAG(vector_store, [], []),  # Will be initialized properly
         "reranker": RerankerRAG(vector_store),
         "query_decomposition": QueryDecompositionRAG(vector_store),
         "hyde": HyDERAG(vector_store),
@@ -147,6 +166,13 @@ async def startup_event():
         "multi_query": MultiQueryRAG(vector_store, num_queries=3),
         "fusion": FusionRAG(vector_store, num_queries=3),
     }
+
+    # Only add hybrid if corpus is available
+    if corpus_texts:
+        rag_models["hybrid"] = HybridRAG(vector_store, corpus_texts, corpus_ids)
+    else:
+        logger.warning("HybridRAG not initialized: no corpus loaded for BM25")
+
     logger.info(f"Initialized {len(rag_models)} RAG configurations")
     
     # Initialize guardrails

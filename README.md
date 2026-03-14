@@ -69,7 +69,7 @@ _*Reranker confidence artificially low due to Cohere Trial key rate-limit fallba
 
 3. **Reranker achieves the highest faithfulness** (0.583) when it successfully reranks, but Cohere Trial key limits (10 calls/min) cause 85% fallback rate during benchmarking.
 
-4. **Query Decomposition adds latency (3.3x) without proportional quality gains** on MS MARCO's simple factoid queries. It would likely show greater benefit on multi-hop reasoning tasks.
+4. **Query Decomposition adds latency (3.3x) without proportional quality gains** on MS MARCO's simple factoid queries (ROUGE-L 0.156 vs Baseline 0.154). Would likely show greater benefit on multi-hop reasoning tasks.
 
 5. **Retrieval confidence alone cannot prevent hallucination.** Failure analysis shows ~80% of answers that pass the guardrail have low faithfulness (<0.4), indicating NLI or claim-level verification is needed.
 
@@ -84,13 +84,13 @@ _Confidence score distribution by strategy. Red dashed line = default threshold 
 
 RAG systems are widely adopted but their retrieval strategy choices are often made without empirical justification. This project asks:
 
-1. **Does hybrid retrieval outperform pure semantic search?** Yes - BM25 rescues keyword-specific queries that dense embeddings miss, improving guardrail pass rate from 0% to 35%.
+1. **Does hybrid retrieval outperform pure semantic search?** Yes — Hybrid achieves 37% higher confidence scores (0.586 vs 0.426) by combining BM25 keyword matching with dense retrieval. At the default 0.6 threshold, Hybrid passes the guardrail on 35% of queries vs 0% for Baseline.
 
-2. **Does reranking improve answer quality?** Conditionally yes - faithfulness improves from 0.296 to 0.550, but at 5x latency cost and API rate-limit sensitivity.
+2. **Does reranking improve answer quality?** Conditionally — faithfulness nearly doubles (0.583 vs 0.292 Baseline), but at 5x latency cost and sensitivity to Cohere API rate limits.
 
-3. **Does query decomposition help?** Yes for complex queries - best ROUGE-L (0.226), but 3x latency overhead.
+3. **Does query decomposition help?** Marginal for simple factoid queries — comparable ROUGE-L to Baseline (0.156 vs 0.154) with 3.3x latency overhead. Would likely benefit multi-hop reasoning tasks.
 
-4. **Can retrieval-score thresholds prevent hallucination?** The threshold works but requires per-dataset calibration. A fixed 0.6 threshold is too conservative for MS MARCO's similarity distribution.
+4. **Can retrieval-score thresholds prevent hallucination?** Partially — thresholds effectively refuse out-of-domain queries, but failure analysis shows ~80% of accepted answers still have low faithfulness. Retrieval confidence is necessary but insufficient; NLI verification is needed.
 
 ---
 
@@ -100,7 +100,7 @@ RAG systems are widely adopted but their retrieval strategy choices are often ma
 Query --> [Retrieval Strategy] --> [Guardrail Check] --> [LLM Generation] --> Response
                 |                        |                      |
           ChromaDB / BM25         Confidence Score         GPT-3.5-turbo
-                |                   (threshold=0.6)        (temp=0, seed=42)
+                |                   (threshold=0.3)        (temp=0, seed=42)
           [Optional Reranker]
 ```
 
