@@ -1,12 +1,13 @@
-"""Quick system test script to verify installation and configuration."""
+"""System installation test - verifies packages, config, env vars, and directories."""
 
 import sys
 from pathlib import Path
 
+
 def test_imports():
     """Test if all required packages can be imported."""
     print("Testing imports...")
-    required_packages = [
+    required = [
         ("yaml", "PyYAML"),
         ("dotenv", "python-dotenv"),
         ("loguru", "loguru"),
@@ -15,46 +16,38 @@ def test_imports():
         ("langchain", "langchain"),
         ("streamlit", "streamlit"),
     ]
-    
     failed = []
-    for module_name, package_name in required_packages:
+    for module_name, package_name in required:
         try:
             __import__(module_name)
             print(f"  [OK] {package_name}")
         except ImportError:
             print(f"  [FAIL] {package_name}")
             failed.append(package_name)
-    
+
     if failed:
-        print(f"\n[ERROR] Missing packages: {', '.join(failed)}")
-        print("Run: pip install -r requirements.txt")
+        print(f"\nMissing: {', '.join(failed)}. Run: pip install -r requirements.txt")
         return False
-    else:
-        print("[SUCCESS] All packages installed\n")
-        return True
+    print()
+    return True
 
 
 def test_config():
     """Test configuration loading."""
     print("Testing configuration...")
     try:
-        from src.utils.config_loader import ConfigLoader
-        config = ConfigLoader()
-        print(f"  [OK] Config file loaded: {config.config_path}")
-        
-        # Check essential config sections
-        required_sections = ["dataset", "llm", "rag_configs", "evaluation"]
-        for section in required_sections:
-            if section in config.config:
-                print(f"  [OK] Section '{section}' found")
-            else:
-                print(f"  [FAIL] Section '{section}' missing")
+        from src.utils.config_loader import get_config
+        config = get_config()
+        for section in ["dataset", "llm", "rag_configs", "evaluation"]:
+            val = config.get(section, None)
+            status = "[OK]" if val is not None else "[FAIL]"
+            print(f"  {status} Section '{section}'")
+            if val is None:
                 return False
-        
-        print("[SUCCESS] Configuration valid\n")
+        print()
         return True
     except Exception as e:
-        print(f"[ERROR] Configuration error: {e}\n")
+        print(f"  [ERROR] {e}\n")
         return False
 
 
@@ -63,102 +56,58 @@ def test_env():
     print("Testing environment variables...")
     import os
     from dotenv import load_dotenv
-    
     load_dotenv()
-    
-    required_vars = {
-        "OPENAI_API_KEY": "Required for LLM and embeddings",
-        "COHERE_API_KEY": "Required for reranking (Config 3)"
-    }
-    
+
+    keys = {"OPENAI_API_KEY": "Required for LLM/embeddings", "COHERE_API_KEY": "Required for reranker"}
     missing = []
-    for var, description in required_vars.items():
-        value = os.getenv(var)
-        if value:
-            masked = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
-            print(f"  [OK] {var}: {masked}")
+    for var, desc in keys.items():
+        val = os.getenv(var)
+        if val:
+            print(f"  [OK] {var}: {val[:8]}...{val[-4:]}")
         else:
-            print(f"  [FAIL] {var}: Not set - {description}")
+            print(f"  [FAIL] {var}: Not set - {desc}")
             missing.append(var)
-    
-    if missing:
-        print(f"\n[WARNING] Missing API keys: {', '.join(missing)}")
-        print("Create a .env file from .env.example and add your API keys")
-        return False
-    else:
-        print("[SUCCESS] All required API keys set\n")
-        return True
+    print()
+    return len(missing) == 0
 
 
 def test_directories():
     """Test required directories exist."""
     print("Testing directories...")
-    required_dirs = [
-        "data/raw",
-        "data/processed",
-        "data/vector_db",
-        "logs",
-        "results",
-        "configs"
-    ]
-    
-    all_exist = True
-    for dir_path in required_dirs:
-        path = Path(dir_path)
-        if path.exists():
-            print(f"  [OK] {dir_path}")
+    for d in ["data/raw", "data/processed", "data/vector_db", "logs", "results", "configs"]:
+        p = Path(d)
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            print(f"  [CREATED] {d}")
         else:
-            print(f"  [WARN] {dir_path} - creating...")
-            path.mkdir(parents=True, exist_ok=True)
-            all_exist = False
-    
-    print("[SUCCESS] All directories ready\n")
+            print(f"  [OK] {d}")
+    print()
     return True
 
 
 def main():
-    """Run all tests."""
     print("=" * 60)
-    print("RAG Benchmark System - Installation Test")
-    print("=" * 60)
-    print()
-    
-    tests = [
-        ("Package Imports", test_imports),
-        ("Configuration", test_config),
-        ("Environment Variables", test_env),
-        ("Directories", test_directories),
-    ]
-    
+    print("RAG Benchmark - Installation Test")
+    print("=" * 60 + "\n")
+
     results = []
-    for name, test_func in tests:
+    for name, fn in [("Imports", test_imports), ("Config", test_config),
+                     ("Env vars", test_env), ("Directories", test_directories)]:
         try:
-            result = test_func()
-            results.append((name, result))
+            results.append((name, fn()))
         except Exception as e:
-            print(f"[ERROR] {name} failed with error: {e}\n")
+            print(f"  [ERROR] {name}: {e}\n")
             results.append((name, False))
-    
+
     print("=" * 60)
-    print("Test Summary")
-    print("=" * 60)
-    
     for name, passed in results:
-        status = "[PASSED]" if passed else "[FAILED]"
-        print(f"{status}: {name}")
-    
-    print()
-    
-    all_passed = all(result for _, result in results)
-    if all_passed:
-        print("[SUCCESS] All tests passed! System is ready to use.")
-        print("\nNext steps:")
-        print("  1. python main.py prepare-data    # Download and prepare dataset")
-        print("  2. python main.py benchmark        # Run benchmarks")
-        print("  3. streamlit run src/ui/app.py     # Launch UI")
+        print(f"{'[PASS]' if passed else '[FAIL]'} {name}")
+
+    if all(r for _, r in results):
+        print("\nAll tests passed. Run: python main.py prepare-data")
         return 0
     else:
-        print("[WARNING] Some tests failed. Please fix the issues above.")
+        print("\nSome tests failed. Fix the issues above.")
         return 1
 
 

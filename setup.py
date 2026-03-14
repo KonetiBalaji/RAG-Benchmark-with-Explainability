@@ -15,7 +15,7 @@ setup(
     long_description_content_type="text/markdown",
     author="MalikaReddy Eppa, DhanaSree",
     author_email="",
-    url="https://github.com/yourusername/rag-benchmark",
+    url="https://github.com/KonetiBalaji/RAG-Benchmark-with-Explainability",
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=[
