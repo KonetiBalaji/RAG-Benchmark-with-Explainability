@@ -13,6 +13,7 @@ langchain-community==0.0.19
 
 # Vector Database
 chromadb==0.4.22
+onnxruntime>=1.17.0
 
 # Search and Retrieval
 rank-bm25==0.2.2

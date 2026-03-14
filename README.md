@@ -238,11 +238,13 @@ guardrails:
 | Category | Metric | What It Measures |
 |----------|--------|-----------------|
 | Generation | ROUGE-L F1 | N-gram overlap between generated and reference answer |
-| Generation | Faithfulness | Whether answer claims are grounded in retrieved context |
+| Generation | Faithfulness (word-overlap) | Fraction of answer words grounded in retrieved context |
 | Operational | Confidence Score | Max retrieval similarity score (proxy for retrieval quality) |
 | Operational | Guardrail Trigger Rate | % of queries where guardrail refused to answer |
 | Operational | Latency (ms) | End-to-end response time |
 | Operational | Cost (USD) | API usage cost per query |
+
+_Note: The benchmark uses a simplified word-overlap faithfulness metric. Full RAGAS faithfulness (NLI-based claim verification) and LLM-as-Judge evaluation are available via the REST API (`POST /evaluate`) but are not used in the automated benchmark pipeline._
 
 ### Statistical Testing
 
