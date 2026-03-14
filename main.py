@@ -79,54 +79,64 @@ def build_index():
     logger.info(f"Vector index built: {vector_store.get_count()} documents")
 
 
-def run_benchmark():
-    """Run full benchmark across all RAG configurations."""
+def run_benchmark(query_limit: int = None):
+    """Run full benchmark across all RAG configurations.
+
+    Args:
+        query_limit: If set, only benchmark on the first N queries.
+                     Useful for quick debug runs (e.g. --limit 20).
+    """
     logger.info("Starting benchmark...")
-    
+
     # Load data
     processed_dir = Path("./data/processed")
     if not (processed_dir / "queries.parquet").exists():
         logger.error("Processed data not found. Run 'prepare-data' first.")
         return
-    
+
     import pandas as pd
     queries_df = pd.read_parquet(processed_dir / "queries.parquet")
     passages_df = pd.read_parquet(processed_dir / "passages.parquet")
-    
+
     # Initialize vector store
     vector_store = VectorStore()
-    
+
     if vector_store.get_count() == 0:
         logger.error("Vector index not found. Run 'build-index' first.")
         return
-    
+
     # Prepare chunks for hybrid search
     chunker = TextChunker()
     chunks = chunker.chunk_documents(passages_df["text"].tolist())
     chunk_texts = [c["text"] for c in chunks]
     chunk_ids = [c["chunk_id"] for c in chunks]
-    
+
     # Initialize RAG models
     config = get_config()
     rag_models = {}
-    
+
     if config.get("rag_configs.baseline.enabled", True):
         rag_models["Baseline"] = BaselineRAG(vector_store)
-    
+
     if config.get("rag_configs.hybrid.enabled", True):
         rag_models["Hybrid"] = HybridRAG(vector_store, chunk_texts, chunk_ids)
-    
+
     if config.get("rag_configs.reranker.enabled", True):
         rag_models["Reranker"] = RerankerRAG(vector_store)
-    
+
     if config.get("rag_configs.query_decomposition.enabled", True):
         rag_models["Query Decomposition"] = QueryDecompositionRAG(vector_store)
-    
+
     logger.info(f"Initialized {len(rag_models)} RAG configurations")
-    
+
     # Prepare queries for benchmark
     queries = queries_df.to_dict('records')
-    
+
+    # Apply query limit for debug runs
+    if query_limit and query_limit < len(queries):
+        logger.info(f"Debug mode: limiting to {query_limit} queries (out of {len(queries)})")
+        queries = queries[:query_limit]
+
     # Run benchmark
     benchmark = RAGBenchmark()
     results = benchmark.run_benchmark(
@@ -135,23 +145,23 @@ def run_benchmark():
         apply_guardrails=True,
         output_dir=Path("./results"),
     )
-    
+
     # Print summary
     logger.info("=" * 80)
     logger.info("BENCHMARK SUMMARY")
     logger.info("=" * 80)
-    
+
     for config_name, metrics in results["summary"]["aggregated_metrics"].items():
         logger.info(f"\n{config_name}:")
         for metric, value in metrics.items():
             if isinstance(value, float):
                 logger.info(f"  {metric}: {value:.4f}")
-    
+
     # Print cost summary
     cost_summary = results["cost_summary"]
     logger.info(f"\nTotal Cost: ${cost_summary['total_cost_usd']:.4f}")
     logger.info(f"Remaining Budget: ${cost_summary['remaining_usd']:.2f}")
-    
+
     logger.info("\nResults saved to ./results/")
 
 
@@ -183,7 +193,7 @@ def main():
         "--limit",
         type=int,
         default=None,
-        help="Limit number of passages to process"
+        help="Limit number of queries for benchmark (e.g. --limit 20 for debug)"
     )
     
     args = parser.parse_args()
@@ -201,7 +211,7 @@ def main():
         elif args.command == "build-index":
             build_index()
         elif args.command == "benchmark":
-            run_benchmark()
+            run_benchmark(query_limit=args.limit)
         elif args.command == "ui":
             launch_ui()
         elif args.command == "quick-test":
