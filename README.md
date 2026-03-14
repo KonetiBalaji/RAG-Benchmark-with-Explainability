@@ -15,6 +15,7 @@ An empirical comparison of 4 RAG (Retrieval-Augmented Generation) retrieval stra
 
 ## Table of Contents
 
+- [Project Walkthrough (Professor Guide)](#project-walkthrough-professor-guide)
 - [Key Results](#key-results)
 - [Research Motivation](#research-motivation)
 - [Architecture](#architecture)
@@ -32,6 +33,239 @@ An empirical comparison of 4 RAG (Retrieval-Augmented Generation) retrieval stra
 - [Limitations and Future Work](#limitations-and-future-work)
 - [References](#references)
 - [License](#license)
+
+---
+
+## Project Walkthrough (Professor Guide)
+
+This section explains the entire project end-to-end: what it is, why it matters, how every piece works, how to run it, and what we found. Read this section to fully understand the project before the presentation.
+
+### What This Project Is
+
+This is a **comparative evaluation framework** for RAG (Retrieval-Augmented Generation) systems. Instead of just building one RAG pipeline, we built a benchmarking system that tests **4 different retrieval strategies** on the **same dataset under identical conditions** and measures how each strategy affects answer quality, hallucination rates, latency, and cost.
+
+We also built and tested a **hallucination guardrail** — a confidence threshold that refuses to answer when the retrieved context isn't relevant enough — and discovered through experiments that this guardrail must be calibrated per dataset and is insufficient on its own to prevent hallucination.
+
+### What is RAG? (In Simple Terms)
+
+RAG = Retrieval-Augmented Generation. Instead of asking an LLM to answer from memory (which causes hallucination), RAG:
+
+1. **Retrieves** relevant document chunks from a database using the query
+2. **Augments** the LLM prompt with those chunks as context
+3. **Generates** an answer grounded in that context
+
+```
+User query: "What is a corporation?"
+         |
+         v
+[1. RETRIEVE] --> Search 10,000 document chunks --> Find top 3 most relevant
+         |
+         v
+[2. AUGMENT]  --> "Using this context: [chunk1, chunk2, chunk3], answer: What is a corporation?"
+         |
+         v
+[3. GENERATE] --> GPT-3.5-turbo produces answer based on the retrieved context
+         |
+         v
+Answer: "A corporation is a company or group of people authorized to act as a single entity..."
+```
+
+The key question is: **how you retrieve** those chunks makes a big difference in answer quality. That's what this project measures.
+
+### The 4 Retrieval Strategies We Compared
+
+| Strategy | How It Retrieves | When It Helps | When It Fails |
+|----------|-----------------|---------------|---------------|
+| **Baseline (Semantic)** | Embeds query with OpenAI, finds similar chunks via cosine similarity in ChromaDB | General queries with clear semantic meaning | Keyword-specific queries, rare terms |
+| **Hybrid (BM25 + Semantic)** | Combines keyword matching (BM25) AND semantic search, merges results with weighted scores | Technical terms, proper nouns, specific phrases | Adds minimal complexity |
+| **Reranker (Cohere)** | Retrieves 10 candidates with semantic search, then uses Cohere's cross-encoder to rerank by relevance | Complex queries needing nuanced relevance | Expensive, rate-limited on trial keys |
+| **Query Decomposition** | Uses GPT to break a complex question into 2-3 sub-questions, retrieves for each, combines results | Multi-part questions ("What caused X and how did it affect Y?") | Simple factoid questions (adds latency without benefit) |
+
+### How Guardrails Work
+
+A **guardrail** is a safety mechanism that prevents the system from generating an answer when it's not confident enough.
+
+```
+Retrieved chunks have similarity scores (0 to 1):
+  Chunk 1: "A corporation is a legal entity..." → score: 0.72
+  Chunk 2: "Corporate law governs..."          → score: 0.65
+  Chunk 3: "Business structures include..."    → score: 0.58
+
+max_score = 0.72
+
+IF max_score >= threshold (0.3) → PASS → Generate answer
+IF max_score <  threshold (0.3) → REFUSE → "I don't have enough information..."
+```
+
+**What we discovered**: The default threshold (0.6) causes the Baseline strategy to refuse **100% of queries** because MS MARCO's cosine similarity scores cluster between 0.3-0.6. We ran a **threshold sensitivity sweep** (0.1 to 0.8) and found the optimal threshold for this dataset is 0.3.
+
+But even with a tuned threshold, we found that **80% of accepted answers still have low faithfulness** — meaning the guardrail can't catch cases where the system retrieves somewhat-relevant context but generates an answer that goes beyond it. This is our most important finding.
+
+### Metrics We Measured (What Each Number Means)
+
+| Metric | What It Measures | How It's Computed | Good Score |
+|--------|-----------------|-------------------|------------|
+| **ROUGE-L F1** | How similar is the generated answer to the ground-truth reference answer? | Longest common subsequence between generated and reference answer, normalized | Higher = better (0.15-0.25 is typical for open-domain QA) |
+| **Faithfulness (word-overlap)** | Is the generated answer grounded in the retrieved context? | Count what fraction of answer words appear in the retrieved chunks (excluding stop words) | Higher = more grounded (0.3+ is reasonable) |
+| **Confidence Score** | How relevant is the best retrieved chunk to the query? | Maximum cosine similarity score among retrieved chunks | Higher = more relevant context (0.4-0.7 typical for MS MARCO) |
+| **Guardrail Trigger Rate** | How often does the system refuse to answer? | % of queries where max similarity < threshold | Lower = more answers, but too low means allowing bad answers |
+| **Latency (ms)** | How fast is the end-to-end response? | Wall-clock time from query to answer (includes API calls) | Lower = faster (500-1000ms is good, 3000+ is slow) |
+
+### How to Run Everything (Step by Step)
+
+**Step 1: Install and configure**
+```bash
+git clone https://github.com/KonetiBalaji/RAG-Benchmark-with-Explainability.git
+cd RAG-Benchmark-with-Explainability
+python -m venv venv
+venv\Scripts\activate              # Windows
+pip install -r requirements.txt
+cp .env.example .env               # Then edit .env with your API keys
+```
+
+**Step 2: Prepare data and build index (one-time setup, ~4 min, ~$0.10)**
+```bash
+python main.py prepare-data        # Downloads MS MARCO from HuggingFace
+python main.py build-index         # Chunks documents, generates embeddings, builds ChromaDB index
+```
+
+**Step 3: Run the benchmark**
+```bash
+python main.py benchmark --limit 20   # Quick run: 20 queries, ~3 min, ~$0.06
+python main.py benchmark              # Full run: 500 queries, ~60 min, ~$5
+```
+This produces CSV files in `./results/` with per-query and aggregated metrics.
+
+**Step 4: Run the experiments**
+```bash
+python experiments/threshold_sweep.py --queries 20    # Guardrail threshold sensitivity
+python experiments/failure_analysis.py --queries 20   # Failure case categorization
+python experiments/generate_plots.py                  # Generate all 4 plots
+```
+
+**Step 5: Launch the interactive UI**
+```bash
+python main.py ui                  # Opens Streamlit at http://localhost:8501
+```
+In the UI you can:
+- Type a query and see the answer with retrieved evidence chunks and similarity scores
+- Compare two strategies side-by-side on the same query
+- Upload your own PDF/DOCX/TXT/CSV documents and query them
+- See guardrail status (PASSED/TRIGGERED) and confidence level
+
+**Step 6: Launch the REST API**
+```bash
+uvicorn src.api.main:app --reload  # Opens at http://localhost:8000/docs
+```
+
+### What the Benchmark Outputs
+
+After running `python main.py benchmark`, you get:
+
+| Output File | What It Contains |
+|-------------|-----------------|
+| `results/aggregated_metrics.csv` | Mean, std, min, max for each metric per strategy |
+| `results/statistical_tests.csv` | Paired t-tests (each strategy vs Baseline) |
+| `results/best_configs.csv` | Best strategy for each metric |
+| `results/Baseline_results.csv` | Per-query results for Baseline |
+| `results/Hybrid_results.csv` | Per-query results for Hybrid |
+| `results/Reranker_results.csv` | Per-query results for Reranker |
+| `results/Query_Decomposition_results.csv` | Per-query results for Query Decomposition |
+
+After running the experiments:
+
+| Output File | What It Contains |
+|-------------|-----------------|
+| `results/experiments/threshold_sweep.csv` | Trigger rate and ROUGE-L at each threshold level |
+| `results/experiments/failure_analysis.md` | Concrete query examples categorized by guardrail behavior |
+| `docs/screenshots/confidence_distribution.png` | Why the 0.6 threshold fails (boxplot) |
+| `docs/screenshots/threshold_sweep.png` | Trigger rate and ROUGE-L curves across thresholds |
+| `docs/screenshots/generation_metrics.png` | ROUGE-L and Faithfulness bar chart by strategy |
+| `docs/screenshots/faithfulness_vs_latency.png` | Quality vs speed tradeoff scatter |
+
+### The 6 Key Findings (What to Tell the Professor)
+
+**Finding 1 — Guardrail thresholds must be calibrated per dataset.**
+The default 0.6 threshold caused 100% refusal on the Baseline strategy. We ran a threshold sweep (0.1 to 0.8) and discovered the similarity score distribution is dataset-specific. For MS MARCO, 0.3 is optimal. This means anyone deploying RAG guardrails cannot use a universal threshold.
+
+**Finding 2 — Hybrid retrieval is the best default strategy.**
+It achieves 37% higher confidence scores than pure semantic search (0.586 vs 0.426) with no latency penalty. BM25 keyword matching rescues queries that dense embeddings miss (e.g., proper nouns, technical terms). At the 0.6 threshold, Hybrid passes 35% of queries vs 0% for Baseline.
+
+**Finding 3 — Reranking doubles faithfulness but at 5x latency cost.**
+When Cohere reranking succeeds, faithfulness jumps from 0.292 to 0.583. But the Cohere Trial key rate limit (10 calls/min) makes it impractical for batch benchmarking. Best for high-stakes applications where accuracy matters more than speed.
+
+**Finding 4 — Query decomposition doesn't help on simple factoid queries.**
+MS MARCO queries are single-hop factoid questions. Decomposing them into sub-questions adds 3.3x latency (2,262ms vs 679ms) without improving ROUGE-L (0.156 vs 0.154). This strategy would likely shine on multi-hop datasets like HotpotQA.
+
+**Finding 5 — Retrieval confidence alone cannot prevent hallucination.**
+Our failure analysis showed that 80% of answers that pass the guardrail have low faithfulness (<0.4). The guardrail catches out-of-domain queries effectively, but it cannot detect cases where the LLM generates claims that go beyond the retrieved context. NLI-based claim verification is needed.
+
+**Finding 6 — Latency scales predictably with pipeline complexity.**
+Baseline (~679ms) and Hybrid (~622ms) are fast because they only do retrieval + generation. Query Decomposition (~2,262ms) adds an LLM call for decomposition. Reranker (~3,564ms) adds a cross-encoder API call plus rate-limit waits.
+
+### How to Present This (The 2-Minute Pitch)
+
+> "I built a benchmarking system to answer a specific question: how do retrieval strategy choices affect RAG answer quality and hallucination rates?
+>
+> I compared four strategies on MS MARCO — semantic search, hybrid BM25-plus-semantic, Cohere cross-encoder reranking, and query decomposition — measuring ROUGE-L, faithfulness, latency, and cost.
+>
+> The most interesting finding was about guardrails, not strategies. I started with a 0.6 confidence threshold and discovered it caused 100% query refusal on the baseline — the similarity score distribution for this dataset clusters below 0.6. I ran a threshold sweep across 8 values and found the optimal threshold is 0.3 for MS MARCO.
+>
+> But even with a tuned threshold, my failure analysis showed 80% of answers that pass the guardrail have low faithfulness. Retrieval confidence alone is not enough — you need NLI claim-level verification to actually prevent hallucination.
+>
+> On strategies: hybrid retrieval should be the default — 37% higher confidence with zero latency overhead. Reranking doubles faithfulness but at 5x latency cost. Query decomposition doesn't help on simple factoid queries.
+>
+> The system is fully reproducible — deterministic seeds, config-driven thresholds, precomputed embedding cache, and every experiment has a script you can re-run."
+
+### 10 Questions Your Professor Might Ask (With Answers)
+
+**Q1: "Why only 20 queries?"**
+> "The 20-query run was for iterating on methodology. The framework supports 500 queries — I ran 20 to validate the pipeline before committing API budget (~$5 for a full run). The threshold sweep confirms the patterns hold across thresholds."
+
+**Q2: "Your faithfulness metric is just word overlap. Why not NLI or RAGAS?"**
+> "I implemented RAGAS integration and NLI guardrails using BART-large-MNLI, but the NLI model produced 60% false-positive rates on short MS MARCO passages. Rather than report unreliable NLI numbers, I used the simple metric and noted the limitation honestly. RAGAS and LLM-as-Judge evaluation are available via the REST API for future work."
+
+**Q3: "The Reranker has 85% trigger rate — how can you trust its results?"**
+> "The 85% trigger rate is from Cohere Trial key rate limits causing fallbacks, not from low retrieval quality. Only 3 queries actually got reranked successfully. Those 3 show strong faithfulness (0.583), but the sample is too small to draw firm conclusions. With a production API key, the trigger rate would be near 0%."
+
+**Q4: "Query decomposition shows no benefit. Did you test it wrong?"**
+> "MS MARCO has simple factoid queries. Query decomposition is designed for multi-hop reasoning — 'What caused X and how did Y respond?' On single-hop questions, decomposition adds latency without benefit. HotpotQA or MuSiQue would be a better testbed for this strategy."
+
+**Q5: "What is your most important finding?"**
+> "That guardrail thresholds must be calibrated per dataset, and that even calibrated thresholds are insufficient. The threshold sweep proves the first point empirically. The failure analysis proves the second — 80% false-negative rate means retrieval confidence can catch out-of-domain queries but not within-domain hallucination."
+
+**Q6: "How is this different from just running RAGAS?"**
+> "RAGAS evaluates a single pipeline. This system compares multiple retrieval strategies under identical conditions and adds guardrail behavior analysis — the threshold sweep and failure analysis are experiments RAGAS doesn't provide."
+
+**Q7: "You have 7 strategies but only benchmarked 4. Why?"**
+> "The 4 benchmarked strategies cover the fundamental retrieval archetypes: dense-only, sparse+dense, reranking, and query reformulation. The 3 experimental ones (HyDE, Self-RAG, Multi-Query Fusion) are implemented and unit-tested, but I prioritized evaluation depth over breadth."
+
+**Q8: "What would you do with more time?"**
+> "Three things: full 500-query benchmark for statistical significance, NLI-based faithfulness evaluation with per-dataset threshold tuning, and cross-domain testing on Natural Questions to check if findings generalize."
+
+**Q9: "Why ChromaDB instead of Pinecone?"**
+> "ChromaDB runs locally with zero infrastructure — important for reproducible benchmarking. Cloud-hosted vector DBs introduce network latency variance that would confound measurements. For production I'd switch, but for controlled evaluation, local is better."
+
+**Q10: "What's the practical recommendation?"**
+> "Use hybrid retrieval as the default (37% better confidence, zero latency overhead). Don't hardcode guardrail thresholds (run a sweep on your dataset). And don't rely on retrieval confidence alone for hallucination prevention (you need claim-level NLI verification)."
+
+### Key Definitions Reference
+
+| Term | Definition |
+|------|-----------|
+| **RAG** | Retrieval-Augmented Generation: retrieve relevant documents, then generate answers grounded in them |
+| **Embedding** | A numerical vector (1536 numbers) representing the meaning of text, generated by OpenAI's text-embedding-3-small |
+| **Cosine Similarity** | Measures how similar two embeddings are (0 = unrelated, 1 = identical meaning) |
+| **BM25** | A keyword-matching algorithm that scores documents by term frequency (like a smarter Ctrl+F) |
+| **Cross-Encoder Reranking** | A model that takes (query, document) pairs and scores relevance more accurately than embeddings alone |
+| **ChromaDB** | An open-source vector database that stores embeddings and searches by similarity |
+| **Guardrail** | A safety check that refuses to answer when retrieval confidence is too low |
+| **Faithfulness** | Whether the generated answer is grounded in the retrieved context (vs fabricated) |
+| **ROUGE-L** | Measures overlap between generated answer and reference answer using longest common subsequence |
+| **Paired t-test** | Statistical test comparing two conditions on the same queries to check if differences are significant |
+| **Threshold Sweep** | Running the same experiment at multiple threshold values to find the optimal setting |
+| **False Negative (guardrail)** | System generates an answer (guardrail passes) but the answer is unfaithful |
+| **False Positive (guardrail)** | System refuses to answer (guardrail triggers) but a good answer was possible |
 
 ---
 
