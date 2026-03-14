@@ -192,15 +192,15 @@ Generates query variations, retrieves with each, merges via Reciprocal Rank Fusi
 
 ### Layer 1: Retrieval Confidence Threshold (Active)
 
-Refuses to generate an answer if the highest similarity score among retrieved chunks falls below a threshold (default: 0.6).
+Refuses to generate an answer if the highest similarity score among retrieved chunks falls below a configurable threshold.
 
 ```
 max_score = max(chunk.score for chunk in retrieved_chunks)
-if max_score < 0.6:
+if max_score < threshold:     # default 0.6, tuned to 0.3 for MS MARCO
     -> refuse with: "I don't have enough confident information..."
 ```
 
-**Calibration finding**: The 0.6 threshold causes 100% refusal for Baseline semantic search on MS MARCO. ChromaDB cosine similarity scores for this dataset cluster in the 0.3-0.6 range. This threshold must be tuned per dataset - a lower threshold (e.g., 0.3) would allow more answers through while still catching genuinely irrelevant retrievals.
+**Calibration finding**: The original 0.6 threshold causes 100% refusal for Baseline semantic search on MS MARCO because ChromaDB cosine similarity scores for this dataset cluster in the 0.3-0.6 range. After a threshold sensitivity sweep (see Experiments), we tuned it to 0.3, which allows all strategies to produce answers while still catching genuinely out-of-domain queries.
 
 Confidence levels:
 - **High** (>= 0.8): Strong evidence in retrieved context
@@ -456,7 +456,7 @@ llm:
   seed: 42
 
 guardrails:
-  retrieval_threshold: 0.6
+  retrieval_threshold: 0.3    # Tuned for MS MARCO
   nli_enabled: false
 ```
 
@@ -495,7 +495,7 @@ docker run -p 8501:8501 --env-file .env rag-benchmark
 
 ### Current Limitations
 
-- **Guardrail threshold miscalibration**: The default 0.6 threshold causes 100% refusal on Baseline semantic search. ChromaDB cosine similarities for MS MARCO cluster below 0.6. This prevents cross-strategy generation metric comparison for Baseline.
+- **Guardrail threshold is dataset-dependent**: The original 0.6 threshold caused 100% refusal on Baseline. We tuned it to 0.3 via a threshold sweep, but different datasets will require re-tuning.
 - **Reranker rate limiting**: Cohere Trial key (10 calls/min) causes frequent fallbacks during benchmarking, producing artificially low confidence scores.
 - **No retrieval metrics (Precision@k, MRR)**: The ground-truth passage IDs from MS MARCO don't align with chunk-level IDs after text splitting. Retrieval metric computation needs chunk-to-passage mapping.
 - **Small evaluation set**: Current results are from 20-query debug runs. Full 500-query results pending.
