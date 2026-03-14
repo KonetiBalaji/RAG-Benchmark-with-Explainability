@@ -45,10 +45,15 @@ data/vector_db/*
 !data/vector_db/.gitkeep
 
 # Results and logs
-results/*
 logs/*
-!results/.gitkeep
 !logs/.gitkeep
+
+# Keep benchmark results (evidence for the paper)
+results/*.xlsx
+results/*.tmp
+
+# Claude Code
+.claude/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -60,7 +65,7 @@ Thumbs.db
 
 # Model cache
 .cache/
-models/
+/models/
 
 # Temporary files
 tmp_*

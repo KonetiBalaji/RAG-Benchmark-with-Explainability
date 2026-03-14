@@ -94,7 +94,7 @@ evaluation:
     
 # Hallucination Guardrails Configuration
 guardrails:
-  retrieval_threshold: 0.6  # Minimum similarity score
+  retrieval_threshold: 0.3  # Tuned for MS MARCO cosine similarity distribution
   nli_enabled: false  # Disabled - too conservative for demo
   nli_model: "facebook/bart-large-mnli"  # Proven, stable NLI model
   nli_threshold: 0.5  # Minimum entailment probability
@@ -107,7 +107,7 @@ guardrails:
 rate_limiting:
   openai_rpm: 3500  # Requests per minute
   openai_tpm: 90000  # Tokens per minute
-  cohere_rpm: 100
+  cohere_rpm: 10  # Cohere Trial key limit (upgrade for higher)
   max_retries: 3
   retry_delay: 1  # seconds
 
