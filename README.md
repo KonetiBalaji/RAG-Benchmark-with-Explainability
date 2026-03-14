@@ -121,7 +121,6 @@ src/
 ├── data/                # Data loading and processing
 │   ├── data_loader.py           # MS MARCO + custom file upload
 │   ├── text_chunker.py          # Recursive splitting (512 tokens, 50 overlap)
-│   ├── semantic_chunker.py      # Topic-aware hierarchical chunking
 │   ├── embedding_generator.py   # OpenAI text-embedding-3-small (with caching)
 │   └── vector_store.py          # ChromaDB with persistence
 ├── evaluation/          # Metrics and benchmarking
@@ -138,15 +137,17 @@ src/
 ├── middleware/           # API middleware
 │   ├── auth.py                  # API key authentication
 │   └── rate_limiter.py          # Token-bucket rate limiting (60 req/min)
-└── utils/               # Utilities
-    ├── config_loader.py         # YAML config management
-    ├── cost_tracker.py          # Real-time API cost tracking (USD)
+├── utils/               # Utilities
+│   ├── config_loader.py         # YAML config management
+│   ├── cost_tracker.py          # Real-time API cost tracking (USD)
+│   ├── validators.py            # Input validation
+│   ├── exceptions.py            # Custom exceptions
+│   └── logger.py                # Structured logging (loguru)
+└── experimental/        # Implemented but not yet integrated
+    ├── query_preprocessor.py    # Query spell-check, expansion, classification
     ├── citation_generator.py    # Claim-to-source attribution
-    ├── query_preprocessor.py    # 5-step query preprocessing
     ├── cache.py                 # Redis caching layer
-    ├── validators.py            # Input validation
-    ├── exceptions.py            # Custom exceptions
-    └── logger.py                # Structured logging (loguru)
+    └── semantic_chunker.py      # Similarity-based document chunking
 ```
 
 ### Design Decisions
